@@ -2,12 +2,12 @@ use core::mem::{self, ManuallyDrop, MaybeUninit};
 use core::ops::{Deref, DerefMut};
 use core::ptr::{self, NonNull};
 use core::{cmp, fmt, hash, slice};
+use std::os::fd::RawFd;
 
 use alloc::{
     borrow::{Borrow, BorrowMut},
     boxed::Box,
     string::String,
-    vec,
     vec::Vec,
 };
 
@@ -16,6 +16,8 @@ use crate::bytes::Vtable;
 #[allow(unused)]
 use crate::loom::sync::atomic::AtomicMut;
 use crate::loom::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
+use crate::mm::mapped_vec::MappedVec;
+use crate::mm::memory_domain;
 use crate::{Buf, BufMut, Bytes, TryGetError};
 
 /// A unique reference to a contiguous slice of memory.
@@ -74,7 +76,7 @@ pub struct BytesMut {
 // is used. Using `Arc` ended up requiring a number of funky transmutes and
 // other shenanigans to make it work.
 struct Shared {
-    vec: Vec<u8>,
+    vec: MappedVec<u8>,
     original_capacity_repr: usize,
     ref_count: AtomicUsize,
 }
@@ -145,7 +147,9 @@ impl BytesMut {
     /// ```
     #[inline]
     pub fn with_capacity(capacity: usize) -> BytesMut {
-        BytesMut::from_vec(Vec::with_capacity(capacity))
+        let ret= BytesMut::from_vec(MappedVec::with_capacity(capacity));
+        // std::println!("with_capacity: ptr={} capacity={}", ret.ptr.as_ptr() as usize, capacity);
+        return ret;
     }
 
     /// Creates a new `BytesMut` with default capacity.
@@ -284,7 +288,9 @@ impl BytesMut {
     /// zeros.into_iter().for_each(|x| assert_eq!(x, 0));
     /// ```
     pub fn zeroed(len: usize) -> BytesMut {
-        BytesMut::from_vec(vec![0; len])
+        let mut b = BytesMut::with_capacity(len);
+        b.resize(len, 0);
+        b
     }
 
     /// Splits the bytes into two at the given index.
@@ -610,6 +616,8 @@ impl BytesMut {
         let len = self.len();
         let kind = self.kind();
 
+        // std::println!("reserve_inner: ptr={}, additional={}", self.ptr.as_ptr() as usize, additional);
+
         if kind == KIND_VEC {
             // If there's enough free space before the start of the buffer, then
             // just copy the data backwards and reuse the already-allocated
@@ -770,7 +778,7 @@ impl BytesMut {
         new_cap = cmp::max(new_cap, original_capacity);
 
         // Create a new vector to store the data
-        let mut v = ManuallyDrop::new(Vec::with_capacity(new_cap));
+        let mut v = ManuallyDrop::new(MappedVec::with_capacity(new_cap));
 
         // Copy the bytes
         v.extend_from_slice(self.as_ref());
@@ -964,7 +972,7 @@ impl BytesMut {
     // internal change could make a simple pattern (`BytesMut::from(vec)`)
     // suddenly a lot more expensive.
     #[inline]
-    pub(crate) fn from_vec(vec: Vec<u8>) -> BytesMut {
+    pub(crate) fn from_vec(vec: MappedVec<u8>) -> BytesMut {
         let mut vec = ManuallyDrop::new(vec);
         let ptr = vptr(vec.as_mut_ptr());
         let len = vec.len();
@@ -1189,6 +1197,13 @@ impl BytesMut {
             slice::from_raw_parts_mut(ptr.cast(), len)
         }
     }
+
+    /// Returns the details of the mmapped fd that was used to provide 
+    /// memory for all the data allocations that were a part of this 
+    /// BytesMut instance 
+    pub fn get_mmap_details() -> (RawFd, usize, usize) {
+        memory_domain::get_mmap_details()
+    }
 }
 
 impl Drop for BytesMut {
@@ -1348,7 +1363,9 @@ impl DerefMut for BytesMut {
 
 impl<'a> From<&'a [u8]> for BytesMut {
     fn from(src: &'a [u8]) -> BytesMut {
-        BytesMut::from_vec(src.to_vec())
+        let mut vec = MappedVec::with_capacity(src.len());
+        vec.extend_from_slice(src);
+        BytesMut::from_vec(vec)
     }
 }
 
@@ -1494,7 +1511,7 @@ impl Extend<Bytes> for BytesMut {
 
 impl FromIterator<u8> for BytesMut {
     fn from_iter<T: IntoIterator<Item = u8>>(into_iter: T) -> Self {
-        BytesMut::from_vec(Vec::from_iter(into_iter))
+        BytesMut::from_vec(MappedVec::from_iter(into_iter))
     }
 }
 
@@ -1694,25 +1711,25 @@ impl PartialOrd<BytesMut> for str {
     }
 }
 
-impl PartialEq<Vec<u8>> for BytesMut {
-    fn eq(&self, other: &Vec<u8>) -> bool {
+impl PartialEq<MappedVec<u8>> for BytesMut {
+    fn eq(&self, other: &MappedVec<u8>) -> bool {
         *self == other[..]
     }
 }
 
-impl PartialOrd<Vec<u8>> for BytesMut {
-    fn partial_cmp(&self, other: &Vec<u8>) -> Option<cmp::Ordering> {
+impl PartialOrd<MappedVec<u8>> for BytesMut {
+    fn partial_cmp(&self, other: &MappedVec<u8>) -> Option<cmp::Ordering> {
         (**self).partial_cmp(&other[..])
     }
 }
 
-impl PartialEq<BytesMut> for Vec<u8> {
+impl PartialEq<BytesMut> for MappedVec<u8> {
     fn eq(&self, other: &BytesMut) -> bool {
         *other == *self
     }
 }
 
-impl PartialOrd<BytesMut> for Vec<u8> {
+impl PartialOrd<BytesMut> for MappedVec<u8> {
     fn partial_cmp(&self, other: &BytesMut) -> Option<cmp::Ordering> {
         other.partial_cmp(self)
     }
@@ -1796,7 +1813,7 @@ impl PartialEq<Bytes> for BytesMut {
     }
 }
 
-impl From<BytesMut> for Vec<u8> {
+impl From<BytesMut> for MappedVec<u8> {
     fn from(bytes: BytesMut) -> Self {
         let kind = bytes.kind();
         let bytes = ManuallyDrop::new(bytes);
@@ -1816,7 +1833,10 @@ impl From<BytesMut> for Vec<u8> {
 
                 vec
             } else {
-                return ManuallyDrop::into_inner(bytes).deref().to_vec();
+                let bytes = ManuallyDrop::into_inner(bytes);
+                let mut vec = MappedVec::with_capacity(bytes.len());
+                vec.extend_from_slice(bytes.deref());
+                return vec;
             }
         };
 
@@ -1852,12 +1872,12 @@ fn invalid_ptr<T>(addr: usize) -> *mut T {
     ptr.cast::<T>()
 }
 
-unsafe fn rebuild_vec(ptr: *mut u8, mut len: usize, mut cap: usize, off: usize) -> Vec<u8> {
+unsafe fn rebuild_vec(ptr: *mut u8, mut len: usize, mut cap: usize, off: usize) -> MappedVec<u8> {
     let ptr = ptr.sub(off);
     len += off;
     cap += off;
 
-    Vec::from_raw_parts(ptr, len, cap)
+    MappedVec::from_raw_parts(ptr, len, cap)
 }
 
 // ===== impl SharedVtable =====
@@ -1881,23 +1901,9 @@ unsafe fn shared_v_clone(data: &AtomicPtr<()>, ptr: *const u8, len: usize) -> By
 unsafe fn shared_v_to_vec(data: &AtomicPtr<()>, ptr: *const u8, len: usize) -> Vec<u8> {
     let shared: *mut Shared = data.load(Ordering::Relaxed).cast();
 
-    if (*shared).is_unique() {
-        let shared = &mut *shared;
-
-        // Drop shared
-        let mut vec = core::mem::take(&mut shared.vec);
-        release_shared(shared);
-
-        // Copy back buffer
-        ptr::copy(ptr, vec.as_mut_ptr(), len);
-        vec.set_len(len);
-
-        vec
-    } else {
-        let v = slice::from_raw_parts(ptr, len).to_vec();
-        release_shared(shared);
-        v
-    }
+    let v = slice::from_raw_parts(ptr, len).to_vec();
+    release_shared(shared);
+    v
 }
 
 unsafe fn shared_v_to_mut(data: &AtomicPtr<()>, ptr: *const u8, len: usize) -> BytesMut {
@@ -1923,9 +1929,11 @@ unsafe fn shared_v_to_mut(data: &AtomicPtr<()>, ptr: *const u8, len: usize) -> B
             data: shared,
         }
     } else {
-        let v = slice::from_raw_parts(ptr, len).to_vec();
+        let slice = slice::from_raw_parts(ptr, len);
+        let mut vec = MappedVec::with_capacity(slice.len());
+        vec.extend_from_slice(slice);
         release_shared(shared);
-        BytesMut::from_vec(v)
+        BytesMut::from_vec(vec)
     }
 }
 

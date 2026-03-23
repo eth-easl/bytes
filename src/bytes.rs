@@ -15,6 +15,7 @@ use crate::buf::IntoIter;
 #[allow(unused)]
 use crate::loom::sync::atomic::AtomicMut;
 use crate::loom::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
+use crate::mm::mapped_vec::MappedVec;
 use crate::{Buf, BytesMut};
 
 /// A cheaply cloneable and sliceable chunk of contiguous memory.
@@ -965,6 +966,13 @@ impl From<Vec<u8>> for Bytes {
     }
 }
 
+impl From<MappedVec<u8>> for Bytes {
+    fn from(vec: MappedVec<u8>) -> Bytes {
+        // Parinay: Try to integrate shrink_to_fit somehow
+        Bytes::from_owner(vec)
+    }
+}
+
 impl From<Box<[u8]>> for Bytes {
     fn from(slice: Box<[u8]>) -> Bytes {
         // Box<[u8]> doesn't contain a heap allocation for empty slices,
@@ -1115,8 +1123,20 @@ unsafe fn owned_to_vec<T>(data: &AtomicPtr<()>, ptr: *const u8, len: usize) -> V
     vec
 }
 
+unsafe fn owned_to_mapped_vec<T>(data: &AtomicPtr<()>, ptr: *const u8, len: usize) -> MappedVec<u8> {
+    assert!(false);
+    let slice = slice::from_raw_parts(ptr, len);
+    let mut vec = MappedVec::with_capacity(len);
+    unsafe {
+        ptr::copy_nonoverlapping(slice.as_ptr(), vec.as_mut_ptr(), len);
+        vec.set_len(len);
+    }
+    owned_drop_impl::<T>(data.load(Ordering::Relaxed));
+    vec
+}
+
 unsafe fn owned_to_mut<T>(data: &AtomicPtr<()>, ptr: *const u8, len: usize) -> BytesMut {
-    BytesMut::from_vec(owned_to_vec::<T>(data, ptr, len))
+    BytesMut::from_vec(owned_to_mapped_vec::<T>(data, ptr, len))
 }
 
 unsafe fn owned_is_unique(_data: &AtomicPtr<()>) -> bool {
@@ -1221,10 +1241,13 @@ unsafe fn promotable_to_mut(
         // Thus, we can safely reconstruct a Vec from it without leaking memory.
         debug_assert_eq!(kind, KIND_VEC);
 
+        // Problem is that if buf does not belong to the mapped region then it's a problem
+        assert!(false);
+
         let buf = f(shared);
         let off = ptr.offset_from(buf) as usize;
         let cap = off + len;
-        let v = Vec::from_raw_parts(buf, cap, cap);
+        let v = MappedVec::from_raw_parts(buf, cap, cap);
 
         let mut b = BytesMut::from_vec(v);
         b.advance_unchecked(off);
@@ -1402,18 +1425,26 @@ unsafe fn shared_to_mut_impl(shared: *mut Shared, ptr: *const u8, len: usize) ->
         let buf = shared.buf;
         let cap = shared.cap;
 
+        assert!(false);
+
         // Rebuild Vec
         let off = ptr.offset_from(buf) as usize;
-        let v = Vec::from_raw_parts(buf, len + off, cap);
+        let v = MappedVec::from_raw_parts(buf, len + off, cap);
 
         let mut b = BytesMut::from_vec(v);
         b.advance_unchecked(off);
         b
     } else {
         // Copy the data from Shared in a new Vec, then release it
-        let v = slice::from_raw_parts(ptr, len).to_vec();
+        let slice = slice::from_raw_parts(ptr, len);
+        let mut vec = MappedVec::with_capacity(len);
+        unsafe {
+            ptr::copy_nonoverlapping(slice.as_ptr(), vec.as_mut_ptr(), len);
+            vec.set_len(len);
+        }
+    
         release_shared(shared);
-        BytesMut::from_vec(v)
+        BytesMut::from_vec(vec)
     }
 }
 

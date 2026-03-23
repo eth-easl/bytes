@@ -79,6 +79,8 @@ extern crate std;
 pub mod buf;
 pub use crate::buf::{Buf, BufMut};
 
+pub mod mm;
+
 mod bytes;
 mod bytes_mut;
 mod fmt;
