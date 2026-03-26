@@ -10,20 +10,20 @@ use nix::{
     unistd::ftruncate,
 };
 use std::{
-    cell::RefCell, env, ffi::CString, format, io::{Error, ErrorKind, Result}, num::NonZeroUsize, os::{fd::RawFd, raw::c_void}, println, ptr::NonNull, str::FromStr, sync::LazyLock, thread_local
+    cell::RefCell, env, ffi::CString, format, io::{Error, ErrorKind, Result}, num::NonZeroUsize, os::{fd::RawFd, raw::c_void}, ptr::NonNull, str::FromStr, sync::LazyLock, thread_local
 };
 
 use crate::mm::constants::mimalloc_constants::{MI_ARENA_BLOCK_SIZE, MI_SEGMENT_ALIGN};
 
-pub struct MemoryDomain {
-    pub fd: RawFd,
-    pub arena_id: mi_arena_id_t,
-    pub base_ptr: usize,
-    pub size: usize,
+struct MemoryDomain {
+    fd: RawFd,
+    arena_id: mi_arena_id_t,
+    base_ptr: usize,
+    size: usize,
 }
 
 impl MemoryDomain {
-    pub fn init() -> Result<MemoryDomain> {
+    fn init() -> Result<MemoryDomain> {
         // setting the default size of the memory domain to 1GB
         let mut mm_size_bytes = env::var("MM_SIZE_BYTES")
             .map_err(|e| Error::new(ErrorKind::NotFound, format!("MM_SIZE_BYTES missing: {}", e)))?
@@ -128,7 +128,7 @@ impl MemoryDomain {
     }
 }
 
-pub static MAPPED_MEMORY_DOMAIN: LazyLock<MemoryDomain> =
+static MAPPED_MEMORY_DOMAIN: LazyLock<MemoryDomain> =
     LazyLock::new(|| MemoryDomain::init().expect("Failed to initialize memory domain"));
 
 thread_local! {
@@ -137,7 +137,7 @@ thread_local! {
     );
 }
 
-pub fn alloc_from_domain<T>(size: usize) -> (NonNull<T>, usize) {
+pub(crate) fn alloc_from_domain<T>(size: usize) -> (NonNull<T>, usize) {
     if size == 0 || size_of::<T>() == 0 {
         return (NonNull::dangling(), size);
     }
@@ -151,7 +151,7 @@ pub fn alloc_from_domain<T>(size: usize) -> (NonNull<T>, usize) {
     })
 }
 
-pub fn realloc_in_domain<T>(ptr: NonNull<T>, new_size: usize) -> (NonNull<T>, usize) {
+pub(crate) fn realloc_in_domain<T>(ptr: NonNull<T>, new_size: usize) -> (NonNull<T>, usize) {
     if new_size == 0 || size_of::<T>() == 0 {
         return (NonNull::dangling(), new_size);
     }
@@ -172,12 +172,13 @@ pub fn realloc_in_domain<T>(ptr: NonNull<T>, new_size: usize) -> (NonNull<T>, us
     })
 }
 
-pub fn free_to_domain<T>(ptr: NonNull<T>) {
+pub(crate) fn free_to_domain<T>(ptr: NonNull<T>) {
     unsafe {
         mi_free(ptr.as_ptr() as *mut c_void);
     }
 }
 
+/// Returns the file descriptor, the domain base ptr as well as the size
 pub fn get_mmap_details() -> (RawFd, usize, usize) {
     (MAPPED_MEMORY_DOMAIN.fd, MAPPED_MEMORY_DOMAIN.base_ptr, MAPPED_MEMORY_DOMAIN.size)
 }

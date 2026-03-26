@@ -2,7 +2,6 @@ use core::mem::{self, ManuallyDrop, MaybeUninit};
 use core::ops::{Deref, DerefMut};
 use core::ptr::{self, NonNull};
 use core::{cmp, fmt, hash, slice};
-use std::os::fd::RawFd;
 
 use alloc::{
     borrow::{Borrow, BorrowMut},
@@ -17,7 +16,6 @@ use crate::bytes::Vtable;
 use crate::loom::sync::atomic::AtomicMut;
 use crate::loom::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
 use crate::mm::mapped_vec::MappedVec;
-use crate::mm::memory_domain;
 use crate::{Buf, BufMut, Bytes, TryGetError};
 
 /// A unique reference to a contiguous slice of memory.
@@ -148,7 +146,6 @@ impl BytesMut {
     #[inline]
     pub fn with_capacity(capacity: usize) -> BytesMut {
         let ret= BytesMut::from_vec(MappedVec::with_capacity(capacity));
-        // std::println!("with_capacity: ptr={} capacity={}", ret.ptr.as_ptr() as usize, capacity);
         return ret;
     }
 
@@ -615,8 +612,6 @@ impl BytesMut {
     fn reserve_inner(&mut self, additional: usize, allocate: bool) -> bool {
         let len = self.len();
         let kind = self.kind();
-
-        // std::println!("reserve_inner: ptr={}, additional={}", self.ptr.as_ptr() as usize, additional);
 
         if kind == KIND_VEC {
             // If there's enough free space before the start of the buffer, then
@@ -1196,13 +1191,6 @@ impl BytesMut {
 
             slice::from_raw_parts_mut(ptr.cast(), len)
         }
-    }
-
-    /// Returns the details of the mmapped fd that was used to provide 
-    /// memory for all the data allocations that were a part of this 
-    /// BytesMut instance 
-    pub fn get_mmap_details() -> (RawFd, usize, usize) {
-        memory_domain::get_mmap_details()
     }
 }
 
