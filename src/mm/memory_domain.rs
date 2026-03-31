@@ -10,10 +10,23 @@ use nix::{
     unistd::ftruncate,
 };
 use std::{
-    cell::RefCell, env, ffi::CString, format, io::{Error, ErrorKind, Result}, num::NonZeroUsize, os::{fd::RawFd, raw::c_void}, ptr::NonNull, str::FromStr, sync::LazyLock, thread_local
+    cell::RefCell,
+    env,
+    ffi::CString,
+    format,
+    io::{Error, ErrorKind, Result},
+    num::NonZeroUsize,
+    os::{fd::RawFd, raw::c_void},
+    ptr::NonNull,
+    str::FromStr,
+    sync::LazyLock,
+    thread_local,
 };
 
-use crate::mm::constants::mimalloc_constants::{MI_ARENA_BLOCK_SIZE, MI_SEGMENT_ALIGN};
+use crate::mm::utils::{
+    get_default_mmap_size,
+    mimalloc_constants::{MI_ARENA_BLOCK_SIZE, MI_SEGMENT_ALIGN},
+};
 
 struct MemoryDomain {
     fd: RawFd,
@@ -24,16 +37,10 @@ struct MemoryDomain {
 
 impl MemoryDomain {
     fn init() -> Result<MemoryDomain> {
-        // setting the default size of the memory domain to 1GB
         let mut mm_size_bytes = env::var("MM_SIZE_BYTES")
-            .map_err(|e| Error::new(ErrorKind::NotFound, format!("MM_SIZE_BYTES missing: {}", e)))?
-            .parse::<usize>()
-            .map_err(|e| {
-                Error::new(
-                    ErrorKind::InvalidData,
-                    format!("MM_SIZE_BYTES parse error: {}", e),
-                )
-            })?;
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or_else(|| get_default_mmap_size());
 
         // Round down to nearest multiple of MI_SEGMENT_ALIGN
         mm_size_bytes = mm_size_bytes & (!(MI_SEGMENT_ALIGN - 1));
@@ -123,7 +130,7 @@ impl MemoryDomain {
             fd,
             arena_id,
             base_ptr: aligned_ptr as usize,
-            size: mm_size_bytes
+            size: mm_size_bytes,
         })
     }
 }
@@ -180,5 +187,9 @@ pub(crate) fn free_to_domain<T>(ptr: NonNull<T>) {
 
 /// Returns the file descriptor, the domain base ptr as well as the size
 pub fn get_mmap_details() -> (RawFd, usize, usize) {
-    (MAPPED_MEMORY_DOMAIN.fd, MAPPED_MEMORY_DOMAIN.base_ptr, MAPPED_MEMORY_DOMAIN.size)
+    (
+        MAPPED_MEMORY_DOMAIN.fd,
+        MAPPED_MEMORY_DOMAIN.base_ptr,
+        MAPPED_MEMORY_DOMAIN.size,
+    )
 }
